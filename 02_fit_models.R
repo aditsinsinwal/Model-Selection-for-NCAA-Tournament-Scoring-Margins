@@ -1,9 +1,3 @@
-#!/usr/bin/env Rscript
-
-# Compare a seed-only benchmark, Ridge, Elastic Net, LASSO, and a regression
-# tree for NCAA tournament scoring margin. Model selection uses 2015; the
-# 2016-2018 tournaments remain untouched until the final evaluation.
-
 suppressPackageStartupMessages({
   library(data.table)
   library(ggplot2)
@@ -37,18 +31,17 @@ validation <- games[idx_validation]
 final_train <- games[idx_final_train]
 test <- games[idx_test]
 
-# Seed-only benchmark.
 seed_tuning_fit <- lm(margin ~ seed_diff, data = train)
 seed_validation_prediction <- as.numeric(predict(seed_tuning_fit, newdata = validation))
 seed_final_fit <- lm(margin ~ seed_diff, data = final_train)
 seed_test_prediction <- as.numeric(predict(seed_final_fit, newdata = test))
 
-# Tune alpha and lambda without consulting the final season.
+
 penalty_candidates <- data.table(
   candidate = c(
     "Ridge", "Elastic Net (alpha=0.25)", "Elastic Net (alpha=0.50)",
     "Elastic Net (alpha=0.75)", "LASSO"
-  ),
+  )
   family = c("Ridge", "Elastic Net", "Elastic Net", "Elastic Net", "LASSO"),
   prediction_key = c("ridge", "elastic_net", "elastic_net", "elastic_net", "lasso"),
   alpha = c(0, 0.25, 0.50, 0.75, 1)
@@ -149,7 +142,6 @@ penalty_tuning[, adjustment_parameters := vapply(
   integer(1)
 )]
 
-# A regression tree uses short display names so its branches remain readable.
 tree_feature_names <- c(
   seed_diff = "Seed_advantage",
   games_diff = "Games_gap",
@@ -339,8 +331,6 @@ annual_test_metrics <- rbindlist(lapply(sort(unique(test_predictions$Season)), f
   }))
 }))
 
-# Rank unequal-seed games by the selected model's predicted favorite margin.
-# The most vulnerable quartile is the group with the smallest predicted margin.
 upset_games <- test_predictions[!is.na(upset)]
 upset_games[, vulnerability_rank := frank(
   predicted_favorite_margin,
@@ -403,7 +393,6 @@ ggsave(file.path(figures_dir, "01_seed_advantage_and_margin.png"), p1,
   width = 9, height = 5.6, dpi = 200, bg = "white"
 )
 
-# Figure 2: honest test-season error.
 performance_plot <- melt(
   model_metrics,
   id.vars = "model",
@@ -471,7 +460,6 @@ ggsave(file.path(figures_dir, "03_selected_model_calibration.png"), p3,
   width = 7.2, height = 6.1, dpi = 200, bg = "white"
 )
 
-# Figure 4: practical upset-risk ranking.
 p4 <- ggplot(upset_calibration, aes(vulnerability_group, actual_upset_percent)) +
   geom_hline(
     yintercept = 100 * base_upset_rate,
@@ -545,7 +533,6 @@ tree_explanatory_nodes <- data.table(
 )
 fwrite(tree_explanatory_nodes, file.path(results_dir, "tree_explanatory_nodes.csv"))
 
-# Figure 6: standardized effects from the best penalized model.
 best_penalized <- penalty_tuning[which.min(validation_MAE)]
 best_penalized_coefficients <- fread(file.path(
   results_dir,
@@ -575,7 +562,6 @@ ggsave(file.path(figures_dir, "06_penalized_standardized_effects.png"), p6,
   width = 8.6, height = 5.8, dpi = 200, bg = "white"
 )
 
-# Figure 7: the held-out 2015 comparison that actually selected the model.
 validation_plot <- copy(validation_results)
 validation_plot[, model := factor(model, levels = rev(model[order(validation_MAE)]))]
 p7 <- ggplot(validation_plot, aes(validation_MAE, model, fill = selected)) +
@@ -602,8 +588,6 @@ ggsave(file.path(figures_dir, "07_validation_model_comparison.png"), p7,
   width = 8.6, height = 4.8, dpi = 200, bg = "white"
 )
 
-# Figure 8: compare the selected model with the seed-only benchmark in each
-# untouched tournament rather than relying only on the pooled test result.
 annual_plot <- copy(annual_test_metrics)
 annual_plot[, model := factor(model, levels = c("Seed-only linear", selected_model))]
 annual_plot[, label_y := MAE_points + fifelse(model == "Seed-only linear", 0.35, -0.35)]
