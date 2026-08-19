@@ -1,0 +1,195 @@
+---
+title: "Can the Favourite Be Trusted?"
+subtitle: "Model Selection for NCAA Tournament Scoring Margins and Upset Risk"
+author: "Adit Sinsinwal | Student ID: 20988864"
+date: "August 18, 2026"
+geometry: margin=0.82in
+fontsize: 10.5pt
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{float}
+output:
+  html_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(data.table)
+
+games <- fread("data/processed/ncaa_tournament_matchups_2003_2018.csv")
+validation <- fread("results/validation_model_selection.csv")
+metrics <- fread("results/model_metrics_2016_2018.csv")
+penalty <- fread("results/penalty_family_tuning.csv")
+triage <- fread("results/upset_triage_2016_2018.csv")
+calibration <- fread("results/upset_calibration_2016_2018.csv")
+importance <- fread("results/tree_variable_importance.csv")
+
+selected_model <- metrics[selected == TRUE]$model[1]
+selected_metrics <- metrics[selected == TRUE][1]
+
+split_order <- c("Training (2003-2014)", "Validation (2015)", "Test (2016-2018)")
+split_display <- games[, .(Games = .N), by = split]
+split_display[, split := factor(split, levels = split_order)]
+setorder(split_display, split)
+setnames(split_display, "split", "Role and seasons")
+
+validation_display <- validation[, .(
+  Method = model,
+  `Validation MAE` = validation_MAE,
+  `Validation RMSE` = validation_RMSE,
+  Selected = ifelse(selected, "Yes", "No")
+)]
+
+metrics_display <- metrics[, .(
+  Method = model,
+  MAE = MAE_points,
+  `Median AE` = Median_AE_points,
+  RMSE = RMSE_points,
+  `R-squared` = R_squared,
+  `Adjusted R-squared` = Adjusted_R_squared,
+  `Winner accuracy (%)` = Winner_accuracy_percent
+)]
+```
+
+# Decision problem
+
+March Madness earns its name because a season's worth of evidence can disappear in forty minutes. Seeds are useful summaries of team quality, but saying that the lower-numbered seed is favoured does not say whether the matchup looks safe or fragile. A bracket maker, analyst, or coaching staff would rather know how much separation the data suggest and which favourites deserve a closer look.
+
+This report asks:
+
+> Can pre-tournament team statistics predict the scoring margin in an NCAA tournament game and identify favourites at elevated risk of an upset?
+
+I use scoring margin as the primary response. Team 1 is always the team with the smaller numerical identifier, an orientation fixed before looking at the result; a positive margin means Team 1 won. Margin carries more information than a win/loss indicator because it distinguishes a one-point escape from a twenty-point rout. I then turn the fitted margin into a practical secondary output: a ranking of upset risk among games with unequal seeds.
+
+> **Result in one sentence.** The validation-selected Ridge model predicts later tournament margins with an MAE of 8.91 points and concentrates upset risk: 51.4% of the favourites in its most vulnerable fifth lose, compared with 7.9% in its safest fifth.
+
+# Data and leakage-safe features
+
+The data are the men's historical files used in Kaggle's [March Machine Learning Mania](https://www.kaggle.com/competitions/march-machine-learning-mania-2026), retrieved from a [public archive](https://github.com/kjaisingh/Forecasting-March-Madness). They contain 87,366 detailed regular-season games, 1,048 detailed NCAA tournament games, seeds, and team identifiers. Detailed tournament box scores run from 2003 through 2018, so this is a historical model-selection study, not a claim about the 2026 bracket.
+
+I reshape the regular-season games to one row per team-season and calculate 25 summaries, including win rate, average margin, offensive and defensive efficiency, shooting, turnovers, rebounding, opponent strength, and form over the final ten games. Tournament seed is predictor 26. The full feature set is reproducible in `01_build_dataset.R`.
+
+For each tournament matchup, I subtract Team 2's feature from Team 1's. Seed is reversed so that a positive value always means Team 1 has the better seed. The important guardrail is timing: every feature is built only from regular-season games completed before that tournament. Tournament box scores, eventual rounds won, and later seasons never enter a prediction. Without that rule, the model could appear accurate simply because it had been allowed to see the future.
+
+```{r split-table}
+knitr::kable(
+  split_display,
+  booktabs = TRUE,
+  caption = "Chronological model-selection design"
+)
+```
+
+The split is chronological because future tournaments are the real target. Seasons 2003--2014 train the candidates, 2015 selects the method and tuning values, and 2016--2018 remain untouched until the end. After selection, I refit through 2015 and evaluate once on the 201-game test set. This design is stricter than randomly mixing games from the same era and more stable than judging the model on a single tournament.
+
+```{r seed-figure, out.width='92%', fig.align='center', fig.cap='Seed advantage has a clear relationship with scoring margin, but the vertical spread at every seed difference leaves room for both close games and upsets.'}
+knitr::include_graphics("figures/01_seed_advantage_and_margin.png")
+```
+
+# Model selection
+
+Many of the 26 matchup features tell overlapping stories. Strong teams tend to have better seeds, larger average margins, higher win rates, and stronger net efficiency. Ordinary least squares can become unstable when it tries to separate variables that move together, so penalization is a natural fit for this problem.
+
+I treat Ridge, LASSO, and Elastic Net as one penalized-regression framework. For standardized predictors, the fitted coefficients minimize
+
+$$
+\frac{1}{2n}\sum_{i=1}^n (y_i-\beta_0-x_i^T\beta)^2 +
+\lambda\left[\frac{1-\alpha}{2}\sum_{j=1}^p\beta_j^2+
+\alpha\sum_{j=1}^p|\beta_j|\right].
+$$
+
+Ridge uses $\alpha=0$ and shrinks correlated coefficients together. LASSO uses $\alpha=1$ and can remove predictors entirely. Elastic Net occupies the middle ground. I test Elastic Net values $\alpha\in\{0.25,0.50,0.75\}$ and a 120-value $\lambda$ path for each penalty family. The selected combination is the one with the smallest 2015 mean absolute error (MAE), measured in points.
+
+A regression tree supplies a deliberately different, nonlinear comparison. It repeatedly chooses a feature and cut point that reduce within-node squared error. I allow depth six, require at least 35 observations for a split and 14 per terminal node, and choose cost-complexity pruning with the same 2015 MAE criterion. This lets the tree express threshold effects and interactions that a linear penalty cannot.
+
+```{r validation-table}
+knitr::kable(
+  validation_display,
+  digits = c(NA, 2, 2, NA),
+  booktabs = TRUE,
+  caption = "Model selection using only the 2015 validation tournament"
+)
+```
+
+```{r validation-figure, out.width='94%', fig.align='center', fig.pos='H', fig.cap='Held-out 2015 validation MAE. Ridge is highlighted because it has the smallest error, although all three penalized regressions are nearly tied.'}
+knitr::include_graphics("figures/07_validation_model_comparison.png")
+```
+
+Ridge has the smallest validation MAE at 7.33 points. Elastic Net and LASSO are almost tied with it at 7.34 and 7.35; seed alone records 7.72 and the tree 7.81. I therefore lock Ridge as the selected model before scoring any 2016--2018 outcomes. The small gap matters: the evidence supports Ridge, but not a claim that it dominates every reasonable alternative.
+
+```{r tree-figure, out.width='100%', fig.align='center', fig.pos='H', fig.cap='Readable five-leaf pruning of the fitted regression tree. Positive terminal predictions favour Team 1. The performance table uses the validation-selected nine-leaf tree; this smaller view is used only for explanation.'}
+knitr::include_graphics("figures/05_regression_tree_explanatory.png")
+```
+
+The explanatory tree begins with seed advantage. Large disadvantages lead to predicted losses near 15 points, with a win-rate split finding the most uneven group. At the other extreme, a very large seed advantage produces a predicted twenty-point win. When seeds are closer, net-efficiency difference becomes useful. These branches are easy to follow, but they describe predictive groups; they do not prove that changing a seed or efficiency statistic would cause a particular margin.
+
+# Untouched test results
+
+```{r metrics-table, results='asis'}
+if (knitr::is_latex_output()) cat("\\small\n")
+knitr::kable(
+  metrics_display,
+  digits = c(NA, 2, 2, 2, 3, 3, 1),
+  booktabs = TRUE,
+  caption = "Performance on the untouched 2016-2018 tournaments"
+)
+if (knitr::is_latex_output()) cat("\\normalsize\n")
+```
+
+```{r performance-figure, out.width='92%', fig.align='center', fig.cap='Ridge has the lowest test MAE, while all three penalized regressions substantially outperform the regression tree.'}
+knitr::include_graphics("figures/02_model_performance.png")
+```
+
+Ridge finishes with an MAE of 8.91 points, RMSE of 11.89, and 74.1% winner accuracy. Its out-of-time $R^2$ is 0.337, compared with 0.272 for seed alone. In other words, the richer model explains about one-third of later tournament-margin variation. That is useful, but it is not a high-precision score forecast: roughly two-thirds of game-to-game variation remains unexplained.
+
+```{r season-figure, out.width='94%', fig.align='center', fig.pos='H', fig.cap='MAE in each untouched tournament. Ridge beats the seed-only benchmark in all three seasons, although the size of the gain varies.'}
+knitr::include_graphics("figures/08_test_mae_by_season.png")
+```
+
+The pooled result is not being carried by one unusually favourable year. Ridge's MAE is lower than seed alone in 2016 (9.96 versus 10.51), 2017 (7.93 versus 8.18), and 2018 (8.84 versus 9.48). Three seasons are still a small stability check, but the direction is consistent.
+
+```{r calibration-figure, out.width='82%', fig.align='center', fig.pos='H', fig.cap='Observed versus predicted margin for the 2016--2018 test games. The dashed 45-degree line represents perfect predictions.'}
+knitr::include_graphics("figures/03_selected_model_calibration.png")
+```
+
+The predicted-versus-observed plot shows both signal and restraint. Predictions move in the correct direction, yet they cluster much more tightly around zero than the observed margins. Ridge therefore recognizes broad strength differences while shrinking extreme wins and losses toward an ordinary game. Large blowouts and surprising upsets remain the hardest cases, which is consistent with the moderate $R^2$.
+
+Adjusted $R^2$ is 0.238 for Ridge when the conventional correction counts all 26 non-zero coefficients. Elastic Net and LASSO have slightly lower ordinary $R^2$ values near 0.33 but adjusted values near 0.31 because they keep only six and five predictors. For penalized models, coefficient count only approximates effective degrees of freedom, and adjusted $R^2$ is usually an in-sample linear-model summary. I report it as a descriptive complexity check, not a new selection rule. MAE remains the criterion chosen before the test set was opened.
+
+```{r coefficient-figure, out.width='88%', fig.align='center', fig.pos='H', fig.cap='Standardized Ridge effects. Positive values increase Team 1 predicted margin; correlated coefficients should be interpreted jointly rather than causally.'}
+knitr::include_graphics("figures/06_penalized_standardized_effects.png")
+```
+
+The largest standardized Ridge effects belong to schedule strength, seed advantage, regular-season margin, and net efficiency. A one-standard-deviation increase in schedule-strength difference corresponds to about 1.88 additional predicted points; seed advantage contributes about 1.73. These are not isolated causal effects. A strong schedule, good seed, efficient offence, and large season margin often arrive together, which is precisely why shrinkage is helpful.
+
+# From margin prediction to upset risk
+
+Among the 186 test games with unequal seeds, 29.0% end in an upset. I rank favourites by Ridge's predicted favourite margin: the smaller the cushion, the more vulnerable the favourite. The most vulnerable fifth has a 51.4% upset rate, while the safest fifth has only 7.9%.
+
+```{r upset-figure, out.width='70%', fig.align='center', fig.pos='H', fig.cap='Observed upset rate after ranking unequal-seed test games by the selected Ridge model. The monotone decline shows useful risk separation.'}
+knitr::include_graphics("figures/04_upset_risk_groups.png")
+```
+
+Suppose an analyst flags only the most vulnerable quarter of games. In the test period, 46.8% of those favourites lose; the group captures 40.7% of all upsets and has 1.61 times the upset rate of an unranked game. That is the practical value of the project. It does not manufacture a perfect bracket. It narrows a full tournament to a manageable set of games where extra scouting, injury information, or an alternative bracket pick could matter most.
+
+# Limitations and conclusion
+
+Tournament games are noisy, and this dataset cannot see everything that matters. It omits injuries, lineup changes, travel, rest, coaching decisions, matchup-specific defensive schemes, and betting-market information. Seeds already contain committee judgement, so part of the signal comes from an existing human ranking. The archive ends in 2018, covers men's basketball only, and may not reflect later changes such as transfer-portal movement or current three-point strategy. Finally, the upset analysis is observational; no feature here can be called a cause of an upset.
+
+Within those limits, the evidence is encouraging. Pre-tournament statistics explain a meaningful share of future scoring margins, improve on seed alone in every held-out season, and separate vulnerable favourites from safer ones. Ridge is selected because it has the best validation MAE and can retain correlated measures without letting their coefficients grow unchecked. LASSO and Elastic Net show that a much sparser description performs almost as well, while the tree gives a readable view of thresholds and interactions.
+
+My next step would be to rerun this pipeline on a current competition download and add player availability, travel, and rest information known before tip-off. The honest use case would stay the same: a decision-support tool that highlights uncertainty and directs attention, not a promise that March can be made predictable.
+
+# References
+
+\scriptsize
+
+- Breiman, L., Friedman, J. H., Olshen, R. A., and Stone, C. J. (1984). *Classification and Regression Trees*. Wadsworth.
+- Friedman, J., Hastie, T., and Tibshirani, R. (2010). Regularization paths for generalized linear models via coordinate descent. *Journal of Statistical Software*, 33(1), 1--22.
+- Kaggle (2026). *March Machine Learning Mania 2026: Competition Data*.
+- STAT 444 Course Notes (2026). Chapters 1, 2, and 4: prediction error, model selection, penalized regression, and trees.
+- Tibshirani, R. (1996). Regression shrinkage and selection via the LASSO. *Journal of the Royal Statistical Society B*, 58(1), 267--288.
+- Zou, H., and Hastie, T. (2005). Regularization and variable selection via the Elastic Net. *Journal of the Royal Statistical Society B*, 67(2), 301--320.
+
+\normalsize
