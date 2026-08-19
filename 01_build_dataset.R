@@ -1,9 +1,3 @@
-#!/usr/bin/env Rscript
-
-# Build a leakage-safe NCAA tournament matchup dataset from the historical
-# Kaggle March Madness files. Every predictor summarizes regular-season games
-# completed before the NCAA tournament begins.
-
 suppressPackageStartupMessages(library(data.table))
 
 raw_dir <- file.path("data", "raw")
@@ -32,7 +26,6 @@ invert_location <- function(x) {
   fifelse(x == "H", "A", fifelse(x == "A", "H", "N"))
 }
 
-# Express each regular-season game from both teams' perspectives.
 winner <- regular[, .(
   Season, DayNum, TeamID = WTeamID, OppTeamID = LTeamID, location = WLoc,
   win = 1L, points_for = WScore, points_against = LScore,
@@ -92,8 +85,6 @@ team_summary <- team_games[, .(
 ), by = .(Season, TeamID)]
 team_summary[, net_efficiency := offensive_efficiency - defensive_efficiency]
 
-# Recent form uses only the final ten regular-season games, still before the
-# tournament. The complete season is retained for every other statistic.
 recent_summary <- team_games[, tail(.SD, 10L), by = .(Season, TeamID)][, .(
   recent_win_pct = mean(win),
   recent_margin = mean(margin),
@@ -102,7 +93,6 @@ recent_summary <- team_games[, tail(.SD, 10L), by = .(Season, TeamID)][, .(
 ), by = .(Season, TeamID)]
 team_summary <- merge(team_summary, recent_summary, by = c("Season", "TeamID"))
 
-# Strength of schedule is the average full-season win percentage of opponents.
 opponent_strength <- team_summary[, .(
   Season, OppTeamID = TeamID, opponent_win_pct = win_pct
 )]
