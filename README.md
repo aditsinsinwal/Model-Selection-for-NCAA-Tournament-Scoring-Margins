@@ -1,6 +1,6 @@
-# STAT 444 NCAA Tournament Project
+# NCAA Tournament Project
 
-Author: Adit Sinsinwal (Student ID 20988864)
+Author: Adit Sinsinwal 
 
 This project predicts men's NCAA tournament scoring margin using information available before the tournament. It compares a seed-only benchmark, Ridge, Elastic Net, LASSO, and a regression tree, then converts the selected margin forecast into an upset-risk ranking.
 
